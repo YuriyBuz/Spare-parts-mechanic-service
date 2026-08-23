@@ -325,17 +325,6 @@
         // --- НАЛАШТУВАННЯ ---
         const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwfDj4chPzg50KbKwfcPX3dA92I2Vz14z3_ICA2arDEYb-Vk0X3GNDZj3eCg8GximMS/exec'; 
 
-        const MOCK_DATA = [
-            {
-                name: "Підшипники",
-                items: [
-                    { sheetName: "Підшипники", row: 4, no: "1", model: "6200-2RSH", equipment: "Twist off-натяжні ролики ременів", minStock: 10, currentStock: 9, supplierName: "ТОВ ПромПідшипник", supplierPhone: "050-123-45-67" },
-                    { sheetName: "Підшипники", row: 5, no: "2", model: "6201-2Z", equipment: "Електро пила", minStock: 2, currentStock: 1 },
-                    { sheetName: "Підшипники", row: 6, no: "3", model: "608-2RSH", equipment: "ПакТех-направляючі", minStock: 2, currentStock: -1, supplierName: "ФОП Іваненко", supplierPhone: "067-987-65-43" },
-                ]
-            }
-        ];
-
         let allData = []; 
         let historyData = [];
         let appState = {
@@ -508,9 +497,10 @@
 
         const autoLogout = () => {
             if (!session) return;
+            logEvent('tech', 'session.idleLogout', 'бездіяльність понад 10 хв');
             clearSession();
             applyPermissions();
-            closeUsageModal();
+            closeUsageModal('idle');
             showLogin('Сесію завершено через 10 хвилин бездіяльності. Увійдіть за PIN.');
         };
 
@@ -564,8 +554,34 @@
             }
         };
 
+        // toISOString() віддає UTC: після 21:00 за Києвом «сьогодні» стає завтрашнім,
+        // і вечірня зміна не бачить власних списань у «Мої за сьогодні»
+        const localDate = (value) => {
+            const d = value ? new Date(value) : new Date();
+            const pad = (n) => String(n).padStart(2, '0');
+            return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+        };
+
         const authQuery = () => '&token=' + encodeURIComponent(session ? session.token : '') +
                                 '&device=' + encodeURIComponent(getDeviceId());
+
+        // Читання теж має обмеження часу. Wi-Fi у цеху вміє прийняти з'єднання
+        // і не відповісти нічого: без таймауту застосунок назавжди лишався б
+        // на «Завантаження бази ЗІП…».
+        const READ_TIMEOUT_MS = 20000;      // каталог на 250 позицій читається довше за запис
+        const REPORT_TIMEOUT_MS = 60000;    // звіт ще й формується та надсилається
+
+        const apiGet = async (action, timeoutMs) => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs || READ_TIMEOUT_MS);
+            try {
+                const response = await fetch(GOOGLE_SCRIPT_URL + '?action=' + action + authQuery(),
+                                             { redirect: 'follow', signal: controller.signal });
+                return await response.json();
+            } finally {
+                clearTimeout(timer);
+            }
+        };
 
         // --- Локальне розблокування без мережі ---
         // На пристрої зберігається не PIN, а повільно обчислений перевірник.
@@ -712,9 +728,66 @@
         const SYNC_INTERVAL_MS = 30000;
         // Ці відповіді сервера повторювати немає сенсу — потрібне рішення людини
         const PERMANENT_CODES = ['FORBIDDEN', 'NOT_FOUND', 'BAD_TARGET', 'NOT_COUNTED',
-                                 'OVERDRAW', 'ALREADY_CANCELLED', 'TOO_LATE'];
+                                 'OVERDRAW', 'ALREADY_CANCELLED', 'TOO_LATE', 'AMBIGUOUS'];
 
         let syncing = false;
+
+        // --- Журнал подій ---
+        // Три потоки: технічні помилки, стан застосунку і незавершені операції.
+        // Події буферяться на пристрої й вирушають пачкою — щоб діагностика
+        // не перетворилась на запит по кожному руху пальця.
+        const APP_VERSION = 'zip-app-2026-08-23';
+        const EVENT_KEY = 'zipEventsV1';
+        const EVENT_CAP = 60;              // більше не тримаємо: це діагностика, не облік
+        const EVENT_BATCH = 20;
+        const EVENT_FLUSH_MS = 120000;
+        let eventsSending = false;
+
+        const readEvents = () => {
+            try {
+                const stored = JSON.parse(localStorage.getItem(EVENT_KEY) || '[]');
+                return Array.isArray(stored) ? stored : [];
+            } catch (e) { return []; }
+        };
+
+        const logEvent = (kind, event, details, position) => {
+            try {
+                const list = readEvents();
+                list.push({
+                    kind: kind, event: event,
+                    details: String(details === undefined || details === null ? '' : details).slice(0, 500),
+                    position: position || '',
+                    timestamp: new Date().toISOString(),
+                    version: APP_VERSION
+                });
+                // Переповнення губимо з найстаріших: свіжа помилка цінніша за вчорашню
+                localStorage.setItem(EVENT_KEY, JSON.stringify(list.slice(-EVENT_CAP)));
+            } catch (e) { /* журнал подій ніколи не має ламати роботу */ }
+        };
+
+        const flushEvents = async () => {
+            if (eventsSending) return;
+            const list = readEvents();
+            if (!list.length) return;
+            eventsSending = true;
+            const batch = list.slice(0, EVENT_BATCH);
+            try {
+                const result = await apiPost({
+                    action: 'logEvents', entries: batch,
+                    token: session ? session.token : '', deviceId: getDeviceId()
+                });
+                if (result && result.success && !result.throttled) {
+                    // Видаляємо саме надіслані: за час запиту могли додатись нові
+                    const rest = readEvents().filter(item => batch.indexOf(item) === -1 &&
+                        !batch.some(sent => sent.timestamp === item.timestamp && sent.event === item.event));
+                    localStorage.setItem(EVENT_KEY, JSON.stringify(rest));
+                }
+            } catch (e) {
+                // Немає зв'язку — події почекають у буфері
+            } finally {
+                eventsSending = false;
+            }
+        };
 
         const readOutbox = () => {
             try {
@@ -827,6 +900,8 @@
                         lastError: (result && result.error) || 'Сервер відхилив запис',
                         response: result
                     });
+                    logEvent('error', 'sync.rejected', code + ': ' + ((result && result.error) || ''),
+                        item.payload.sheetName + ' · ' + item.payload.model);
                     return 'failed';
                 }
                 return retryLater(item, (result && result.error) || 'Помилка сервера');
@@ -847,6 +922,11 @@
         const retryLater = (item, error) => {
             const attempts = (item.attempts || 0) + 1;
             const delay = BACKOFF_MS[Math.min(attempts - 1, BACKOFF_MS.length - 1)];
+            // Одна невдача — це мережа. Три поспіль — це вже привід подивитись.
+            if (attempts === 3) {
+                logEvent('error', 'sync.stuck', 'спроб: 3, причина: ' + error,
+                    item.payload.sheetName + ' · ' + item.payload.model);
+            }
             patchItem(item.opId, {
                 status: 'pending', attempts, nextAttemptAt: Date.now() + delay, lastError: error
             });
@@ -888,6 +968,7 @@
             } finally {
                 syncing = false;
                 updateNetworkStatus();
+                flushEvents();
             }
         };
 
@@ -994,7 +1075,13 @@
                     drop.textContent = 'Видалити';
                     drop.onclick = async () => {
                         const go = await showCustomDialog(`Видалити запис «${item.payload.model}, ${item.payload.quantity} шт»?\n\nВін не потрапить у журнал.`, true);
-                        if (go) { removeItem(item.opId); renderQueue(); }
+                        if (go) {
+                            logEvent('abandoned', 'op.queueDropped',
+                                operationLabel(item.payload.action) + ', ' + item.payload.quantity +
+                                ' шт, причина відмови: ' + (item.lastError || '—'),
+                                item.payload.sheetName + ' · ' + item.payload.model);
+                            removeItem(item.opId); renderQueue();
+                        }
                     };
                     actions.appendChild(drop);
                     card.appendChild(actions);
@@ -1044,8 +1131,7 @@
                     return;
                 }
 
-                const response = await fetch(GOOGLE_SCRIPT_URL + "?action=getInventory" + authQuery());
-                const data = await response.json();
+                const data = await apiGet('getInventory');
 
                 if (data && data.code === 'AUTH') { handleAuthFailure(); return; }
 
@@ -1067,11 +1153,22 @@
                 }
             } catch (error) {
                 console.error("Fetch error:", error);
+                const timedOut = error && error.name === 'AbortError';
+                logEvent('error', timedOut ? 'error.readTimeout' : 'error.readFailed',
+                    'getInventory: ' + (timedOut ? READ_TIMEOUT_MS + ' мс без відповіді'
+                                                 : (error && error.message) || String(error)));
                 const cached = localStorage.getItem(CACHE_KEY);
                 if (cached) {
                     allData = JSON.parse(cached);
+                    if (!silent) customAlert(timedOut
+                        ? 'Сервер не відповів вчасно.\nПоказано збережену базу — залишки можуть бути застарілі.'
+                        : 'Не вдалося оновити базу.\nПоказано збережену — залишки можуть бути застарілі.');
                 } else {
-                    allData = MOCK_DATA; 
+                    // Показувати вигадані залишки на складі не можна: краще чесна відмова
+                    allData = [];
+                    if (!silent) customAlert(timedOut
+                        ? 'Сервер не відповідає, а бази на цьому пристрої ще немає.\nСпробуйте ще раз, коли буде зв’язок.'
+                        : 'Не вдалося завантажити базу, а збереженої копії на пристрої ще немає.\nПеревірте зв’язок і спробуйте ще раз.');
                 }
                 renderState();
             } finally {
@@ -1095,8 +1192,9 @@
             try {
                 if (!navigator.onLine) throw new Error("Offline");
                 
-                const response = await fetch(GOOGLE_SCRIPT_URL + "?action=getHistory" + authQuery());
-                const data = await response.json();
+                // За «сьогодні» просимо конкретну дату: інакше при активній роботі
+                // свіжі записи випадають за межу останніх 100
+                const data = await apiGet('getHistory' + (onlyToday ? '&date=' + localDate() : ''));
 
                 if (data && data.code === 'AUTH') { handleAuthFailure(); return; }
 
@@ -1107,6 +1205,10 @@
                 }
             } catch (error) {
                 console.warn("Помилка або офлайн, показуємо порожній список", error);
+                if (navigator.onLine) {
+                    logEvent('error', error && error.name === 'AbortError' ? 'error.readTimeout' : 'error.readFailed',
+                        'getHistory: ' + ((error && error.message) || String(error)));
+                }
                 historyData = [];
             } finally {
                 loader.classList.add('hidden');
@@ -1136,8 +1238,7 @@
                 if (!navigator.onLine) {
                     throw new Error("Offline");
                 }
-                const response = await fetch(GOOGLE_SCRIPT_URL + "?action=forceReport" + authQuery());
-                const data = await response.json();
+                const data = await apiGet('forceReport', REPORT_TIMEOUT_MS);
                 if (data && data.success) {
                     const c = data.counts;
                     customAlert(c
@@ -1149,6 +1250,8 @@
                     customAlert('❌ ' + ((data && data.error) || 'Не вдалося надіслати план'));
                 }
             } catch (error) {
+                logEvent('error', error && error.name === 'AbortError' ? 'error.readTimeout' : 'error.readFailed',
+                    'forceReport: ' + ((error && error.message) || String(error)));
                 customAlert("❌ Помилка відправки. Перевірте зв'язок з інтернетом.");
             } finally {
                 loader.classList.add('hidden');
@@ -1329,7 +1432,7 @@
             if (appState.filterHistoryToday) {
                 titleEl.textContent = "Мої списання за сьогодні";
                 const mechanic = session ? session.name : '';
-                const todayStr = new Date().toISOString().split('T')[0]; // "YYYY-MM-DD"
+                const todayStr = localDate();   // дата за місцевим часом, не за UTC
                 
                 filteredHistory = filteredHistory.filter(record => {
                     // Перевіряємо чи дата співпадає з сьогоднішньою (залежить від формату дати в GAS, але GAS має віддавати "YYYY-MM-DD" щоб було легко)
@@ -1507,7 +1610,7 @@
             document.getElementById('useQuantity').value = 1;
             document.getElementById('useLocation').value = item.equipment; // Дефолт
             document.getElementById('useSerial').value = '';
-            document.getElementById('useDate').value = new Date().toISOString().split('T')[0];
+            document.getElementById('useDate').value = localDate();
 
             // Типова операція — перша, дозволена роллю
             setOperation(['registerUsage', 'registerInventory', 'registerRestock'].filter(can)[0] || 'registerUsage');
@@ -1519,7 +1622,17 @@
             setTimeout(() => { modalContent.classList.remove('translate-y-full'); }, 10);
         };
 
-        const closeUsageModal = () => {
+        // reason відсутній = вікно закрила людина. Саме такі випадки цікаві:
+        // механік почав списання і передумав — а деталь міг забрати.
+        const closeUsageModal = (reason) => {
+            if (!reason && currentSelectedItem) {
+                const entered = parseFloat(document.getElementById('useQuantity').value);
+                if (isFinite(entered) && entered > 0) {
+                    logEvent('abandoned', 'op.abandoned',
+                        operationLabel(currentOperation) + ', ' + entered + ' шт',
+                        currentSelectedItem.sheetName + ' · ' + currentSelectedItem.model);
+                }
+            }
             modalContent.classList.add('translate-y-full');
             setTimeout(() => {
                 modal.classList.add('hidden');
@@ -1564,7 +1677,9 @@
             }
         });
 
-        document.getElementById('closeUsageModalBtn').addEventListener('click', closeUsageModal);
+        // Без обгортки сюди прилетів би об'єкт події й зійшов за reason —
+        // і закриття вручну перестало б вважатися незавершеною операцією
+        document.getElementById('closeUsageModalBtn').addEventListener('click', () => closeUsageModal());
         modal.addEventListener('click', (e) => { if (e.target === modal) closeUsageModal(); });
 
         // --- Відправка даних ---
@@ -1596,6 +1711,9 @@
                     patchItem(opId, { status: 'pending', attempts: 0, nextAttemptAt: 0,
                         payload: Object.assign({}, item.payload, { overdrawReason: reason }) });
                 } else {
+                    logEvent('abandoned', 'op.overdrawDeclined',
+                        'просив ' + item.payload.quantity + ', доступно ' + available,
+                        item.payload.sheetName + ' · ' + item.payload.model);
                     return false;
                 }
                 return (await sendItem(opId)) === 'done';
@@ -1607,6 +1725,10 @@
                     return false;
                 }
                 const go = await showCustomDialog(item.lastError + '\n\nПровести інвентаризацію зараз?', true);
+                if (!go) {
+                    logEvent('abandoned', 'op.notCountedDeclined', 'від інвентаризації відмовились',
+                        item.payload.sheetName + ' · ' + item.payload.model);
+                }
                 if (go) {
                     removeItem(opId);
                     setOperation('registerInventory');
@@ -1651,7 +1773,9 @@
             const payload = {
                 action: currentOperation,
                 sheetName: currentSelectedItem.sheetName,
+                // Рядок — лише підказка: позицію сервер упізнає за парою «№ + модель»
                 row: currentSelectedItem.row,
+                no: currentSelectedItem.no,
                 model: currentSelectedItem.model,
                 quantity: quantity,
                 location: location || '-',
@@ -1676,16 +1800,19 @@
                 const outcome = await sendItem(item.opId);
 
                 if (outcome === 'done') {
-                    showSuccessAndClose(false, outboxItem(item.opId).response);
+                    const answer = outboxItem(item.opId).response;
+                    // Позиція виявилась в іншому рядку — наш каталог застарів
+                    if (answer && answer.moved) fetchData(true);
+                    showSuccessAndClose(false, answer);
                 } else if (outcome === 'auth') {
-                    closeUsageModal();
+                    closeUsageModal('auth');
                     handleAuthFailure();
                 } else if (outcome === 'failed') {
                     if (await resolveFailedItem(item.opId)) {
                         showSuccessAndClose(false, outboxItem(item.opId).response);
                     }
                 } else {
-                    closeUsageModal();
+                    closeUsageModal('queued');
                     customAlert('Немає зв’язку.\nЗапис збережено на пристрої й надійде автоматично, щойно з’явиться мережа.');
                 }
             } finally {
@@ -1717,7 +1844,7 @@
                 renderState();
             }
 
-            closeUsageModal();
+            closeUsageModal('done');
             
             if (isOffline) {
                 customAlert("Відсутній зв'язок.\nЗапис збережено в телефоні і буде відправлено автоматично при появі інтернету!");
@@ -1791,11 +1918,30 @@
                 showLogin('Ви вийшли із застосунку');
             });
 
+            // Необроблена помилка на планшеті інакше лишається лише в консолі,
+            // якої ніхто в цеху не відкриє
+            window.addEventListener('error', (e) => {
+                logEvent('error', 'error.js',
+                    (e.message || 'помилка') + ' @ ' + (e.filename || '').split('/').pop() + ':' + (e.lineno || 0));
+            });
+            window.addEventListener('unhandledrejection', (e) => {
+                const reason = e.reason;
+                logEvent('error', 'error.promise',
+                    (reason && (reason.message || reason.name)) || String(reason));
+            });
+            logEvent('tech', 'app.start', 'екран ' + screen.width + '×' + screen.height +
+                ', ' + (navigator.onLine ? 'онлайн' : 'офлайн') +
+                (window.matchMedia('(display-mode: standalone)').matches ? ', встановлений' : ', браузер'));
+
             migrateLegacyQueue();
             resetBackoff();   // сторінку щойно відкрили — це нова спроба, а не продовження старої
             window.addEventListener('online', () => { updateNetworkStatus(); resetBackoff(); flushOutbox(); });
+            setInterval(flushEvents, EVENT_FLUSH_MS);
             window.addEventListener('offline', updateNetworkStatus);
-            document.addEventListener('visibilitychange', () => { if (!document.hidden) flushOutbox(); });
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) { flushEvents(); return; }   // йдемо з екрана — саме час віддати накопичене
+                flushOutbox();
+            });
             setInterval(() => { if (outboxCounts().pending) flushOutbox(); }, SYNC_INTERVAL_MS);
 
             document.getElementById('networkStatusBtn').addEventListener('click', openQueuePanel);
