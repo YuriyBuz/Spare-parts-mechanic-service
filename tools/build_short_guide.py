@@ -8,6 +8,11 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame, Paragraph,
                                 Spacer, Table, TableStyle, FrameBreak, NextPageTemplate)
+import os
+
+# Логотип — та сама іконка, що стоїть на телефоні механіка
+LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'icons', 'icon-512.png')
+HAS_LOGO = os.path.exists(LOGO)
 
 FD = '/usr/share/fonts/truetype/dejavu/'
 pdfmetrics.registerFont(TTFont('DJ',   FD + 'DejaVuSans.ttf'))
@@ -131,12 +136,12 @@ story = []
 A = story.append
 
 A(P('Що це', 'h'))
-A(P('Замість того щоб писати від руки, хто що взяв зі складу, ви відкриваєте застосунок, '
-    'знаходите деталь і натискаєте кнопку. Застосунок сам зменшує залишок і записує, '
+A(P('Замість того щоб писати від руки, хто що взяв зі складу, ви відкриваєте додаток, '
+    'знаходите деталь і натискаєте кнопку. Додаток сам зменшує залишок і записує, '
     'хто, що, коли і куди поставив.'))
 
 A(P('Вхід', 'h'))
-A(P('Введіть свій <b>PIN</b> — і застосунок відкриється. Вхід тримається до 12 годин, '
+A(P('Введіть свій <b>PIN</b> — і додаток відкриється. Вхід тримається до 12 годин, '
     'але якщо не торкатися екрана <b>10 хвилин</b>, він вийде сам. Це щоб залишений на верстаті '
     'планшет не був відкритим складом.'))
 A(Spacer(1, 2))
@@ -177,7 +182,7 @@ A(dots([
     (colors.HexColor('#9ca3af'),  'Немає зв’язку', 'працюйте далі, записи збережуться'),
 ]))
 
-A(P('Якщо застосунок сперечається', 'h'))
+A(P('Якщо додаток сперечається', 'h'))
 A(callout('«На складі лише 2 шт, а ви списуєте 5»', [
     'Оберіть один із варіантів: <b>списати наявні 2</b> (найчастіше так і треба), '
     '<b>списати більше і пояснити чому</b>, або <b>лишити в черзі</b> і розібратись потім.',
@@ -193,16 +198,16 @@ A(P('Відкрийте «Мої за сьогодні», знайдіть за�
     'протягом доби. Залишок повернеться. Нічого не стирайте в таблиці руками.'))
 
 A(P('Без інтернету', 'h'))
-A(P('Застосунок працює й без мережі: запис зберігається в телефоні й піде сам, щойно '
+A(P('Додаток працює й без мережі: запис зберігається в телефоні й піде сам, щойно '
     'з’явиться зв’язок.'))
 A(Spacer(1, 3))
 A(callout('Одне важливе правило', [
-    'Якщо застосунок сказав <b>«Запис збережено на пристрої»</b> — не робіть операцію вдруге. '
+    'Якщо додаток сказав <b>«Запис збережено на пристрої»</b> — не робіть операцію вдруге. '
     'Вона вже в черзі. Повторний запис спише деталь двічі.',
 ], RED_L, RED))
 
 A(P('Коротко', 'h'))
-for t in ['Списуємо <b>в застосунку</b>, а не в таблиці.',
+for t in ['Списуємо <b>в додатку</b>, а не в таблиці.',
           'Кількість — <b>цілими штуками</b>.',
           'Помилку виправляємо <b>«Скасувати»</b>, а не правкою таблиці.',
           'Синя плашка — нормально. Червона — покличте адміністратора.']:
@@ -234,7 +239,7 @@ A(callout('Поповнення', [
 A(Spacer(1, 3))
 A(callout('Інвентаризація', [
     'Перерахували руками. Ви кажете: «тут насправді стільки». Це число стає новою точкою '
-    'відліку. Стара історія не зникає — застосунок покаже, наскільки облік розійшовся з фактом.',
+    'відліку. Стара історія не зникає — додаток покаже, наскільки облік розійшовся з фактом.',
 ], MINT, GREEN))
 A(Spacer(1, 3))
 A(P('Саме інвентаризацією виправляють дивний залишок. Не правкою клітинки в таблиці.', 'tiny'))
@@ -267,7 +272,7 @@ A(callout('Чого робити не можна', [
 ], RED_L, RED))
 A(Spacer(1, 3))
 A(callout('А це — можна', [
-    'Вставляти й сортувати рядки, дописувати нові позиції. Застосунок упізнає деталь за парою '
+    'Вставляти й сортувати рядки, дописувати нові позиції. Додаток упізнає деталь за парою '
     '«номер + назва», а не за номером рядка.',
 ], BLUE_L, BLUE))
 
@@ -277,7 +282,7 @@ A(Spacer(1, 2))
 for fn, why in [
     ('auditSheetSync()',    'звіряє аркуші з журналом. «Аркуші збігаються з журналом» = усе гаразд'),
     ('rebuildOperations()', 'запускати, лише якщо попередня знайшла розходження'),
-    ('auditEvents(7)',      'помилки застосунку за тиждень — перше, куди дивитись при скаргах'),
+    ('auditEvents(7)',      'помилки додатка за тиждень — перше, куди дивитись при скаргах'),
     ('auditPins()',         'чи немає однакових PIN. Після кожної зміни в довіднику'),
     ('auditRecipients()',   'хто отримує звіт і в кого не вказано пошту'),
 ]:
@@ -308,12 +313,24 @@ def band(canvas, doc, title, subtitle, tag):
     canvas.saveState()
     canvas.setFillColor(GREEN)
     canvas.rect(0, H - TOP_BAND, W, TOP_BAND, stroke=0, fill=1)
+
+    # Логотип на білій підкладці: іконка сама зелена і на зеленій смузі загубилась би
+    text_x = MARG_X
+    if HAS_LOGO:
+        side, pad = 15*mm, 1.2*mm
+        y = H - TOP_BAND + (TOP_BAND - side) / 2
+        canvas.setFillColor(colors.white)
+        canvas.roundRect(MARG_X, y, side, side, 3.4*mm, stroke=0, fill=1)
+        canvas.drawImage(LOGO, MARG_X + pad, y + pad, side - 2*pad, side - 2*pad,
+                         mask='auto', preserveAspectRatio=True)
+        text_x = MARG_X + side + 5*mm
+
     canvas.setFillColor(colors.white)
     canvas.setFont('DJ-B', 15)
-    canvas.drawString(MARG_X, H - 15*mm, title)
+    canvas.drawString(text_x, H - 15*mm, title)
     canvas.setFont('DJ', 8.6)
     canvas.setFillColor(colors.HexColor('#d1fae5'))
-    canvas.drawString(MARG_X, H - 21*mm, subtitle)
+    canvas.drawString(text_x, H - 21*mm, subtitle)
     # ярлик сторінки праворуч
     canvas.setFont('DJ-B', 8.6)
     tw = canvas.stringWidth(tag, 'DJ-B', 8.6)
@@ -333,7 +350,7 @@ def band(canvas, doc, title, subtitle, tag):
     canvas.line(W/2, BOTTOM + 2*mm, W/2, H - TOP_BAND - 4*mm)
     canvas.restoreState()
 
-def p1(c, d): band(c, d, 'Як користуватися застосунком', 'Облік запчастин механічної служби', 'ДЛЯ ВСІХ')
+def p1(c, d): band(c, d, 'Як користуватися додатком', 'Облік запчастин механічної служби', 'ДЛЯ ВСІХ')
 def p2(c, d): band(c, d, 'Що вміє адміністратор', 'Додатково до того, що на першій сторінці', 'ДЛЯ АДМІНА')
 
 frames = [Frame(MARG_X, frame_y, col_w, frame_h, id='l', leftPadding=0, rightPadding=0,
@@ -345,7 +362,7 @@ OUT = '/home/user/spare-parts-mechanic-service/docs/ЗІП-коротка-інс
 doc = BaseDocTemplate(OUT, pagesize=A4,
                       leftMargin=MARG_X, rightMargin=MARG_X, topMargin=TOP_BAND, bottomMargin=BOTTOM,
                       title='Облік ЗІП: Механік — коротка інструкція',
-                      author='Механічна служба', subject='Як користуватися застосунком')
+                      author='Механічна служба', subject='Як користуватися додатком')
 doc.addPageTemplates([
     PageTemplate(id='mech',  frames=[f for f in frames], onPage=p1),
     PageTemplate(id='admin', frames=[Frame(MARG_X, frame_y, col_w, frame_h, id='l2', leftPadding=0,
